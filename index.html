@@ -149,7 +149,7 @@
                 lang = 'all',
                 filterType = 'free-ebooks',
                 startIndex = 0,
-                maxResults = 20
+                maxResults = 40
             } = options;
 
             let queryParts = [];
@@ -160,29 +160,30 @@
                 const catObj = CATEGORIES.find(c => c.id === category);
                 if (catObj && catObj.query) queryParts.push(catObj.query);
             } else {
-                queryParts.push('classic fiction');
+                queryParts.push('fiction');
             }
 
             let finalQuery = queryParts.join(' ');
 
-            // Strategy 1: Primary Google Books API call
+            let fetchedItems = [];
+
             try {
-                let url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(finalQuery)}&maxResults=${maxResults}&startIndex=${startIndex}`;
+                let googleUrl = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(finalQuery)}&maxResults=${maxResults}&startIndex=${startIndex}`;
 
                 if (filterType === 'free-ebooks') {
-                    url += `&filter=free-ebooks`;
+                    googleUrl += `&filter=free-ebooks`;
                 }
 
                 if (lang === 'id') {
-                    url += `&langRestrict=id`;
+                    googleUrl += `&langRestrict=id`;
                 } else if (lang === 'en') {
-                    url += `&langRestrict=en`;
+                    googleUrl += `&langRestrict=en`;
                 }
 
-                let res = await fetch(url);
+                let res = await fetch(googleUrl);
                 
-                // If 400 bad request (often caused by strict filter=free-ebooks or langRestrict combinations), retry without filter parameter
-                if (!res.ok && filterType === 'free-ebooks') {
+                // Fallback for strict filter errors or empty free-ebooks result for commercial terms like "Harry Potter"
+                if (!res.ok || res.status === 400) {
                     const fallbackUrl = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(finalQuery)}&maxResults=${maxResults}&startIndex=${startIndex}`;
                     res = await fetch(fallbackUrl);
                 }
@@ -190,161 +191,90 @@
                 if (res.ok) {
                     const data = await res.json();
                     if (data.items && data.items.length > 0) {
-                        return {
-                            items: data.items,
-                            totalItems: data.totalItems || data.items.length
-                        };
+                        fetchedItems = data.items;
                     }
                 }
             } catch (err) {
-                console.warn("Google Books API primary fetch failed, trying Gutendex fallback...", err);
+                console.warn("Google Books API query error, proceeding to alternative open APIs...", err);
             }
 
-            // Strategy 2: Fallback to Gutendex (Project Gutenberg Free eBooks API)
-            try {
-                const gutenRes = await fetch(`https://gutendex.com/books/?search=${encodeURIComponent(finalQuery)}`);
-                if (gutenRes.ok) {
-                    const gutenData = await gutenRes.json();
-                    if (gutenData.results && gutenData.results.length > 0) {
-                        const formattedItems = gutenData.results.map(b => ({
-                            id: `guten_${b.id}`,
-                            volumeInfo: {
-                                title: b.title,
-                                authors: b.authors ? b.authors.map(a => a.name) : ['Domain Publik'],
-                                description: `Buku domain publik klasik "${b.title}" tersedia gratis secara penuh dari Project Gutenberg. Subjek: ${b.subjects ? b.subjects.slice(0,3).join(', ') : 'Sastra Klasik'}.`,
-                                imageLinks: {
-                                    thumbnail: b.formats['image/jpeg'] || `https://placehold.co/300x420/FFC0CB/4A154B?text=${encodeURIComponent(b.title.substring(0, 15))}`
+            if (fetchedItems.length === 0) {
+                try {
+                    const gutenRes = await fetch(`https://gutendex.com/books/?search=${encodeURIComponent(finalQuery)}`);
+                    if (gutenRes.ok) {
+                        const gutenData = await gutenRes.json();
+                        if (gutenData.results && gutenData.results.length > 0) {
+                            fetchedItems = gutenData.results.map(b => ({
+                                id: `guten_${b.id}`,
+                                volumeInfo: {
+                                    title: b.title,
+                                    authors: b.authors ? b.authors.map(a => a.name) : ['Domain Publik'],
+                                    description: `Buku domain publik klasik "${b.title}" tersedia gratis secara penuh dari Project Gutenberg.`,
+                                    imageLinks: {
+                                        thumbnail: b.formats['image/jpeg'] || `https://placehold.co/300x420/FFC0CB/4A154B?text=${encodeURIComponent(b.title.substring(0, 15))}`
+                                    },
+                                    categories: b.subjects ? [b.subjects[0]] : ['Klasik'],
+                                    language: b.languages ? b.languages[0] : 'en',
+                                    averageRating: 4.8,
+                                    ratingsCount: b.download_count || 100
                                 },
-                                categories: b.subjects ? [b.subjects[0]] : ['Klasik'],
-                                language: b.languages ? b.languages[0] : 'en',
-                                averageRating: 4.8,
-                                ratingsCount: b.download_count || 120
-                            },
-                            accessInfo: {
-                                publicDomain: true,
-                                embeddable: false,
-                                pdf: { isAvailable: !!b.formats['application/pdf'], downloadLink: b.formats['application/pdf'] },
-                                epub: { isAvailable: !!b.formats['application/epub+zip'], downloadLink: b.formats['application/epub+zip'] }
-                            },
-                            saleInfo: {
-                                isEbook: true,
-                                saleability: 'FREE'
-                            }
-                        }));
-
-                        return {
-                            items: formattedItems,
-                            totalItems: gutenData.count || formattedItems.length
-                        };
+                                accessInfo: {
+                                    publicDomain: true,
+                                    embeddable: false,
+                                    pdf: { isAvailable: !!b.formats['application/pdf'], downloadLink: b.formats['application/pdf'] },
+                                    epub: { isAvailable: !!b.formats['application/epub+zip'], downloadLink: b.formats['application/epub+zip'] }
+                                },
+                                saleInfo: {
+                                    isEbook: true,
+                                    saleability: 'FREE'
+                                }
+                            }));
+                        }
                     }
+                } catch (e) {
+                    console.warn("Gutendex API error", e);
                 }
-            } catch (err) {
-                console.warn("Gutendex API fallback failed, using curated built-in library...", err);
             }
 
-            // Strategy 3: Local Fallback Curated Free Classics Collection if external APIs are blocked/offline
-            const FALLBACK_BOOKS = [
-                {
-                    id: 'fallback_laskar_pelangi',
-                    volumeInfo: {
-                        title: 'Laskar Pelangi',
-                        authors: ['Andrea Hirata'],
-                        description: 'Kisah 10 anak dari keluarga miskin di Belitung yang berjuang menuntut ilmu di SD Muhammadiyah dengan semangat pantang menyerah.',
-                        imageLinks: { thumbnail: 'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?w=400&q=80' },
-                        categories: ['Novel', 'Edukasi'],
-                        language: 'id',
-                        averageRating: 4.9,
-                        ratingsCount: 1520
-                    },
-                    accessInfo: { publicDomain: true, embeddable: false },
-                    saleInfo: { isEbook: true, saleability: 'FREE' }
-                },
-                {
-                    id: 'fallback_pride_prejudice',
-                    volumeInfo: {
-                        title: 'Pride and Prejudice',
-                        authors: ['Jane Austen'],
-                        description: 'A classic romantic novel following Elizabeth Bennet as she deals with issues of manners, upbringing, morality, education, and marriage.',
-                        imageLinks: { thumbnail: 'https://images.unsplash.com/photo-1543002588-bfa74002ed7e?w=400&q=80' },
-                        categories: ['Romantis', 'Klasik'],
-                        language: 'en',
-                        averageRating: 4.8,
-                        ratingsCount: 3200
-                    },
-                    accessInfo: { publicDomain: true, embeddable: false },
-                    saleInfo: { isEbook: true, saleability: 'FREE' }
-                },
-                {
-                    id: 'fallback_sherlock_holmes',
-                    volumeInfo: {
-                        title: 'The Adventures of Sherlock Holmes',
-                        authors: ['Arthur Conan Doyle'],
-                        description: 'Kumpulan 12 cerita pendek detektif terkenal Sherlock Holmes dan rekannya Dr. John Watson dalam memecahkan misteri di London.',
-                        imageLinks: { thumbnail: 'https://images.unsplash.com/photo-1512820790803-83ca734da794?w=400&q=80' },
-                        categories: ['Fiksi', 'Misteri'],
-                        language: 'en',
-                        averageRating: 4.8,
-                        ratingsCount: 2800
-                    },
-                    accessInfo: { publicDomain: true, embeddable: false },
-                    saleInfo: { isEbook: true, saleability: 'FREE' }
-                },
-                {
-                    id: 'fallback_alice_wonderland',
-                    volumeInfo: {
-                        title: "Alice's Adventures in Wonderland",
-                        authors: ['Lewis Carroll'],
-                        description: 'Kisah petualangan seorang anak perempuan bernama Alice yang jatuh ke dalam lubang kelinci dan memasuki dunia ajaib.',
-                        imageLinks: { thumbnail: 'https://images.unsplash.com/photo-1532012197267-da84d127e765?w=400&q=80' },
-                        categories: ['Anak', 'Fiksi'],
-                        language: 'en',
-                        averageRating: 4.7,
-                        ratingsCount: 1900
-                    },
-                    accessInfo: { publicDomain: true, embeddable: false },
-                    saleInfo: { isEbook: true, saleability: 'FREE' }
-                },
-                {
-                    id: 'fallback_siti_nurbaya',
-                    volumeInfo: {
-                        title: 'Siti Nurbaya (Kasih Tak Sampai)',
-                        authors: ['Marah Rusli'],
-                        description: 'Novel klasik Indonesia mengenai kasih tak sampai antara Samsulbahri dan Siti Nurbaya yang terhalang oleh kemelut tradisi dan Datuk Maringgih.',
-                        imageLinks: { thumbnail: 'https://images.unsplash.com/photo-1457369804613-52c61a468e7d?w=400&q=80' },
-                        categories: ['Romantis', 'Sejarah'],
-                        language: 'id',
-                        averageRating: 4.7,
-                        ratingsCount: 980
-                    },
-                    accessInfo: { publicDomain: true, embeddable: false },
-                    saleInfo: { isEbook: true, saleability: 'FREE' }
-                },
-                {
-                    id: 'fallback_little_women',
-                    volumeInfo: {
-                        title: 'Little Women',
-                        authors: ['Louisa May Alcott'],
-                        description: 'Kisah empat bersaudara perempuan March — Meg, Jo, Beth, dan Amy — dalam perjalanan tumbuh dewasa, cinta, dan impian mereka.',
-                        imageLinks: { thumbnail: 'https://images.unsplash.com/photo-1516979187457-637abb4f9353?w=400&q=80' },
-                        categories: ['Novel', 'Klasik'],
-                        language: 'en',
-                        averageRating: 4.8,
-                        ratingsCount: 2100
-                    },
-                    accessInfo: { publicDomain: true, embeddable: false },
-                    saleInfo: { isEbook: true, saleability: 'FREE' }
+            if (fetchedItems.length === 0 && searchTerm) {
+                try {
+                    const openLibRes = await fetch(`https://openlibrary.org/search.json?q=${encodeURIComponent(searchTerm)}&limit=20`);
+                    if (openLibRes.ok) {
+                        const openLibData = await openLibRes.json();
+                        if (openLibData.docs && openLibData.docs.length > 0) {
+                            fetchedItems = openLibData.docs.map(doc => ({
+                                id: `ol_${doc.key.replace('/works/', '')}`,
+                                volumeInfo: {
+                                    title: doc.title,
+                                    authors: doc.author_name ? doc.author_name : ['Penulis Tidak Diketahui'],
+                                    description: `E-Book terdaftar di Open Library / Internet Archive. Tahun terbit: ${doc.first_publish_year || 'N/A'}.`,
+                                    imageLinks: {
+                                        thumbnail: doc.cover_i ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg` : `https://placehold.co/300x420/FFC0CB/4A154B?text=${encodeURIComponent(doc.title.substring(0, 15))}`
+                                    },
+                                    categories: doc.subject ? [doc.subject[0]] : ['Umum'],
+                                    language: doc.language ? doc.language[0] : 'en',
+                                    averageRating: doc.ratings_average ? doc.ratings_average.toFixed(1) : 4.5,
+                                    ratingsCount: doc.ratings_count || 50
+                                },
+                                accessInfo: {
+                                    publicDomain: true,
+                                    embeddable: false
+                                },
+                                saleInfo: {
+                                    isEbook: true,
+                                    saleability: 'FREE'
+                                }
+                            }));
+                        }
+                    }
+                } catch (e) {
+                    console.warn("OpenLibrary API error", e);
                 }
-            ];
-
-            const filteredFallback = FALLBACK_BOOKS.filter(b => {
-                const matchesQuery = !searchTerm || b.volumeInfo.title.toLowerCase().includes(searchTerm.toLowerCase()) || b.volumeInfo.authors.some(a => a.toLowerCase().includes(searchTerm.toLowerCase()));
-                const matchesLang = lang === 'all' || b.volumeInfo.language === lang;
-                return matchesQuery && matchesLang;
-            });
+            }
 
             return {
-                items: filteredFallback.length > 0 ? filteredFallback : FALLBACK_BOOKS,
-                totalItems: filteredFallback.length || FALLBACK_BOOKS.length
+                items: fetchedItems,
+                totalItems: fetchedItems.length
             };
         };
 
@@ -378,21 +308,19 @@
                         >
                             <input 
                                 type="text"
-                                placeholder="Cari judul, penulis, ISBN, atau topik..."
+                                placeholder="Cari judul (misal: Harry Potter, Naruto), penulis, ISBN..."
                                 value={searchQuery}
                                 onChange={(e) => setSearchQuery(e.target.value)}
-                                className="w-full bg-pink-50/60 text-gray-800 placeholder-pink-300 text-sm rounded-full py-2.5 pl-11 pr-10 border border-pink-200 focus:outline-none focus:ring-2 focus:ring-pink-400 focus:bg-white transition-all"
+                                className="w-full bg-pink-50/60 text-gray-800 placeholder-pink-300 text-sm rounded-full py-2.5 pl-11 pr-20 border border-pink-200 focus:outline-none focus:ring-2 focus:ring-pink-400 focus:bg-white transition-all"
                             />
                             <i className="fas fa-search absolute left-4 top-1/2 -translate-y-1/2 text-pink-400 text-sm"></i>
-                            {searchQuery && (
-                                <button 
-                                    type="button" 
-                                    onClick={() => setSearchQuery('')}
-                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-pink-300 hover:text-pink-500 text-xs p-1"
-                                >
-                                    <i className="fas fa-times"></i>
-                                </button>
-                            )}
+                            
+                            <button
+                                type="submit"
+                                className="absolute right-1.5 top-1/2 -translate-y-1/2 bg-pink-500 hover:bg-pink-600 text-white text-xs px-3 py-1.5 rounded-full font-medium transition-colors"
+                            >
+                                Cari
+                            </button>
                         </form>
 
                         {/* Navigation Links */}
@@ -454,24 +382,21 @@
 
                     {/* Mobile Search Bar Row */}
                     <div className="md:hidden px-4 pb-3">
-                        <form onSubmit={(e) => { e.preventDefault(); onSearchSubmit(); }} className="relative">
+                        <form onSubmit={(e) => { e.preventDefault(); onSearchSubmit(); }} className="relative flex items-center">
                             <input 
                                 type="text"
-                                placeholder="Cari judul, penulis, ISBN..."
+                                placeholder="Cari Harry Potter, Novel, Komik..."
                                 value={searchQuery}
                                 onChange={(e) => setSearchQuery(e.target.value)}
-                                className="w-full bg-pink-50 text-gray-800 placeholder-pink-300 text-sm rounded-full py-2 pl-10 pr-8 border border-pink-200 focus:outline-none focus:ring-2 focus:ring-pink-400"
+                                className="w-full bg-pink-50 text-gray-800 placeholder-pink-300 text-sm rounded-full py-2.5 pl-10 pr-16 border border-pink-200 focus:outline-none focus:ring-2 focus:ring-pink-400"
                             />
                             <i className="fas fa-search absolute left-3.5 top-1/2 -translate-y-1/2 text-pink-400 text-sm"></i>
-                            {searchQuery && (
-                                <button 
-                                    type="button" 
-                                    onClick={() => setSearchQuery('')}
-                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-pink-300 text-xs"
-                                >
-                                    <i className="fas fa-times"></i>
-                                </button>
-                            )}
+                            <button
+                                type="submit"
+                                className="absolute right-1 top-1/2 -translate-y-1/2 bg-pink-500 hover:bg-pink-600 text-white text-xs px-3 py-1.5 rounded-full font-medium"
+                            >
+                                Cari
+                            </button>
                         </form>
                     </div>
                 </header>
@@ -1185,7 +1110,8 @@
             const [searchQuery, setSearchQuery] = useState('');
             const [selectedCategory, setSelectedCategory] = useState('all');
             const [selectedLanguage, setSelectedLanguage] = useState('all'); 
-            const [selectedFilterType, setSelectedFilterType] = useState('free-ebooks'); 
+            const [selectedFilterType, setSelectedFilterType] = useState('full'); // Default to full/all to show maximum books for queries like Harry Potter
+            const [pageIndex, setPageIndex] = useState(0);
 
             // Books API State
             const [books, setBooks] = useState([]);
@@ -1225,31 +1151,38 @@
                 }
             }, [savedBooks]);
 
-            // Execute search query against Books API with robust fallback
-            const handleSearchSubmit = async () => {
+            const handleSearchSubmit = async (append = false) => {
                 setIsLoading(true);
                 setErrorMessage('');
                 setActiveTab('browse');
 
+                const newStartIndex = append ? (pageIndex + 1) * 20 : 0;
+                if (!append) setPageIndex(0);
+
                 const result = await fetchBooksFromAPI(searchQuery, {
                     category: selectedCategory,
                     lang: selectedLanguage,
-                    filterType: selectedFilterType
+                    filterType: selectedFilterType,
+                    startIndex: newStartIndex,
+                    maxResults: 20
                 });
 
                 setIsLoading(false);
                 if (result.items && result.items.length > 0) {
-                    setBooks(result.items);
-                } else if (result.error) {
-                    setErrorMessage(result.error);
-                } else {
+                    if (append) {
+                        setBooks(prev => [...prev, ...result.items]);
+                        setPageIndex(p => p + 1);
+                    } else {
+                        setBooks(result.items);
+                    }
+                } else if (!append) {
                     setBooks([]);
                 }
             };
 
-            // Fetch initial books on load / filter change
+            // Trigger search on category/filter change
             useEffect(() => {
-                handleSearchSubmit();
+                handleSearchSubmit(false);
             }, [selectedCategory, selectedLanguage, selectedFilterType]);
 
             const handleToggleSaveBook = (book) => {
@@ -1371,7 +1304,7 @@
                                 <div className="bg-white rounded-2xl p-4 border border-pink-100 shadow-sm flex flex-wrap items-center justify-between gap-4">
                                     <div className="flex flex-wrap items-center gap-3">
                                         <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">
-                                            <i className="fas fa-filter text-pink-400 mr-1"></i> Filter:
+                                            <i className="fas fa-filter text-pink-400 mr-1"></i> Filter Pencarian:
                                         </span>
 
                                         <select
@@ -1389,21 +1322,21 @@
                                             onChange={(e) => setSelectedFilterType(e.target.value)}
                                             className="bg-pink-50 text-gray-700 text-xs rounded-xl px-3 py-2 border-none focus:ring-2 focus:ring-pink-300 font-medium"
                                         >
-                                            <option value="free-ebooks">Buku Gratis Full</option>
-                                            <option value="full">Semua Pratinjau / Full</option>
+                                            <option value="full">Semua Hasil (Jutaan Buku)</option>
+                                            <option value="free-ebooks">Buku Gratis Saja</option>
                                         </select>
                                     </div>
 
                                     <div className="text-xs text-gray-400 font-medium">
-                                        Ditemukan <span className="text-pink-600 font-bold">{books.length}</span> hasil
+                                        Ditemukan <span className="text-pink-600 font-bold">{books.length}</span> buku untuk "{searchQuery || selectedCategory || 'Semua'}"
                                     </div>
                                 </div>
 
-                                {isLoading ? (
+                                {isLoading && books.length === 0 ? (
                                     <div className="py-20 text-center space-y-4">
                                         <div className="w-12 h-12 border-4 border-pink-200 border-t-pink-500 rounded-full animate-spin mx-auto"></div>
                                         <p className="text-sm font-medium text-pink-500 animate-pulse-pink">
-                                            Mencari buku gratis terbaik di perpustakaan dunia... 🌸
+                                            Mencari jutaan buku di perpustakaan dunia... 🌸
                                         </p>
                                     </div>
                                 ) : errorMessage ? (
@@ -1418,24 +1351,37 @@
                                         </div>
                                         <h3 className="font-display font-bold text-lg text-gray-800">Buku Tidak Ditemukan</h3>
                                         <p className="text-xs text-gray-500 max-w-md mx-auto">
-                                            Coba kata kunci lain atau ubah filter bahasa dan kriteria pencarian Anda.
+                                            Coba ganti filter tipe pencarian ke "Semua Hasil (Jutaan Buku)" atau ketik judul yang lebih spesifik.
                                         </p>
                                     </div>
                                 ) : (
-                                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 sm:gap-6">
-                                        {books.map((book) => {
-                                            const isSaved = savedBooks.some(b => b.id === book.id);
-                                            return (
-                                                <BookCard
-                                                    key={book.id}
-                                                    book={book}
-                                                    onRead={(b) => handleOpenReader(b, 0)}
-                                                    onToggleSave={handleToggleSaveBook}
-                                                    isSaved={isSaved}
-                                                />
-                                            );
-                                        })}
-                                    </div>
+                                    <>
+                                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 sm:gap-6">
+                                            {books.map((book, idx) => {
+                                                const isSaved = savedBooks.some(b => b.id === book.id);
+                                                return (
+                                                    <BookCard
+                                                        key={`${book.id}_${idx}`}
+                                                        book={book}
+                                                        onRead={(b) => handleOpenReader(b, 0)}
+                                                        onToggleSave={handleToggleSaveBook}
+                                                        isSaved={isSaved}
+                                                    />
+                                                );
+                                            })}
+                                        </div>
+
+                                        {/* Load More Button */}
+                                        <div className="text-center pt-8">
+                                            <button
+                                                onClick={() => handleSearchSubmit(true)}
+                                                disabled={isLoading}
+                                                className="px-8 py-3 bg-pink-500 hover:bg-pink-600 text-white font-medium rounded-2xl shadow-md transition-all text-xs sm:text-sm active:scale-95 disabled:opacity-50"
+                                            >
+                                                {isLoading ? 'Memuat...' : 'Muat Lebih Banyak Buku 🌸'}
+                                            </button>
+                                        </div>
+                                    </>
                                 )}
                             </div>
                         )}
